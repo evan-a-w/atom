@@ -1,9 +1,10 @@
 open Core
 
-let add_to_queue ?(start_i = 0) queue ~n =
+let add_to_queue ?counter ?(start_i = 0) queue ~n =
   let thread_id : int = Caml.Domain.self () |> Obj.magic in
   for i = start_i to n + start_i do
-    Atomic_queue.push queue (i, thread_id)
+    Atomic_queue.push queue (i, thread_id);
+    match counter with None -> () | Some counter -> Atomic.incr counter
   done
 
 let pop_to_list ?(max_len = Int.max_value) queue =
@@ -53,3 +54,33 @@ let%expect_test "single thread interleave" =
      (39 0) (40 0) (41 0) (42 0) (43 0) (44 0) (45 0) (46 0) (47 0) (48 0)
      (49 0) (50 0) (51 0) (52 0) (53 0) (54 0) (55 0) (56 0) (57 0) (58 0)
      (59 0) (60 0) (61 0) (62 0) (63 0) (64 0) (65 0) (66 0) (67 0)) |}]
+
+let%test_unit "multi thread" =
+  let queue = Atomic_queue.create () in
+  let res_queue = Atomic_queue.create () in
+  let num_written = Atomic.make 0 in
+  let num_writers = Domain.recommended_domain_count () in
+  let writers =
+    Array.init num_writers ~f:(fun id ->
+        Domain.spawn (fun () ->
+            let start_i = id * 100 in
+            for i = 0 to 9 do
+              add_to_queue ~counter:num_written queue
+                ~start_i:(start_i + (i * 10))
+                ~n:9;
+              for _ = 0 to 9 do
+                match Atomic_queue.pop queue with
+                | None -> ()
+                | Some x -> Atomic_queue.push res_queue x
+              done
+            done))
+  in
+  Array.iter writers ~f:Domain.join;
+  pop_to_list queue |> List.iter ~f:(fun x -> Atomic_queue.push res_queue x);
+  let res_list =
+    pop_to_list res_queue
+    |> List.sort ~compare:(fun (i, _) (j, _) -> Int.compare i j)
+    |> List.map ~f:Tuple2.get1
+  in
+  [%test_eq: int List.t] res_list
+    (List.init (num_writers * 100) ~f:(fun i -> i))
