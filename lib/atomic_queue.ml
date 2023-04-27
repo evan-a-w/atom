@@ -1,36 +1,9 @@
 open Core
 
-type id = int
-
-let slots_per_chunk = 32
-
-type 'a slot = 'a Option.t
-
-type 'a chunk = {
-  next : 'a chunk Option.t Atomic.t;
-  slots : 'a slot Atomic.t Array.t;
-}
-
-let offset id = id mod slots_per_chunk
-
-type 'a position = { chunk : 'a chunk; id : id }
-type 'a queue = { head : 'a position Atomic.t; tail : 'a position Atomic.t }
-
-let wait_till_next_chunk ~chunk =
+let wait_till_written ~atomic_option =
   let backoff = Backoff.create () in
   let rec loop () =
-    match Atomic.get chunk.next with
-    | None ->
-        Backoff.backoff backoff;
-        loop ()
-    | Some x -> x
-  in
-  loop ()
-
-let wait_till_written ~chunk ~offset =
-  let backoff = Backoff.create () in
-  let rec loop () =
-    match Atomic.get chunk.slots.(offset) with
+    match Atomic.get atomic_option with
     | None ->
         Backoff.backoff backoff;
         loop ()
@@ -38,63 +11,110 @@ let wait_till_written ~chunk ~offset =
   in
   loop ()
 
-let write_to_chunk ~chunk ~offset x = Atomic.set chunk.slots.(offset) (Some x)
+module Id = struct
+  type t = int [@@deriving sexp]
+
+  let equal = Int.equal
+end
+
+module Slot = struct
+  type 'a t = 'a Option.t [@@deriving sexp_of]
+end
+
+module Chunk = struct
+  type 'a t = {
+    next : 'a t Option.t Atomic.t;
+    slots : 'a Slot.t Atomic.t Array.t;
+  }
+
+  let slots_per_chunk = 32
+  let offset (id : Id.t) = id mod slots_per_chunk
+  let get t ~id = t.slots.(offset id)
+  let set t ~id ~value = Atomic.set t.slots.(offset id) (Some value)
+
+  let sexp_of_t sexp_of_a t =
+    [%sexp (Array.map t.slots ~f:Atomic.get : a Slot.t array)]
+
+  let create () =
+    {
+      next = Atomic.make None;
+      slots = Array.init slots_per_chunk ~f:(fun _ -> Atomic.make None);
+    }
+end
+
+module Position = struct
+  type 'a t = { chunk : 'a Chunk.t; id : Id.t } [@@deriving sexp_of]
+end
+
+type 'a t = { head : 'a Position.t Atomic.t; tail : 'a Position.t Atomic.t }
 
 let pop queue =
   let backoff = Backoff.create () in
   let rec loop () =
     let head = Atomic.get queue.head in
-    match phys_equal head.id (Atomic.get queue.tail).id with
+    match Id.equal head.id (Atomic.get queue.tail).id with
     | true -> None
     | false -> (
         let new_head =
-          if 0 = offset (head.id + 1) then
+          let id = head.id + 1 in
+          if 0 = Chunk.offset id then
             (* if tail + 1 is on new chunk in push, preallocate it so that this works *)
-            { chunk = wait_till_next_chunk ~chunk:head.chunk; id = head.id + 1 }
-          else { head with id = head.id + 1 }
+            Position.
+              {
+                chunk =
+                  wait_till_written ~atomic_option:head.chunk.next
+                  |> Option.value_exn;
+                id;
+              }
+          else { head with id }
         in
         match Atomic.compare_and_set queue.head head new_head with
         | false ->
             Backoff.backoff backoff;
             loop ()
-        | true -> wait_till_written ~chunk:head.chunk ~offset:(offset head.id))
+        | true ->
+            let atomic_option = Chunk.get head.chunk ~id:head.id in
+            let res = wait_till_written ~atomic_option in
+            Atomic.set atomic_option None;
+            res)
   in
   loop ()
-
-let create_chunk () =
-  {
-    next = Atomic.make None;
-    slots = Array.init slots_per_chunk ~f:(fun _ -> Atomic.make None);
-  }
 
 let push queue x =
   let backoff = Backoff.create () in
   let rec loop () =
     let tail = Atomic.get queue.tail in
     let new_tail =
-      if 0 = offset (tail.id + 1) then
+      let id = tail.id + 1 in
+      if 0 = Chunk.offset id then
         (* if tail + 1 is on new chunk in push, preallocate it so that this works *)
-        { chunk = wait_till_next_chunk ~chunk:tail.chunk; id = tail.id + 1 }
-      else { tail with id = tail.id + 1 }
+        Position.
+          {
+            chunk =
+              wait_till_written ~atomic_option:tail.chunk.next
+              |> Option.value_exn;
+            id;
+          }
+      else { tail with id }
     in
     match Atomic.compare_and_set queue.tail tail new_tail with
     | false ->
         Backoff.backoff backoff;
         loop ()
     | true ->
-        write_to_chunk ~chunk:tail.chunk ~offset:(offset tail.id) x;
-        if 0 = offset (tail.id + 1) then
+        Chunk.set tail.chunk ~id:tail.id ~value:x;
+        if 0 = Chunk.offset (new_tail.id + 1) then
           (* if tail + 1 is on new chunk preallocate it *)
-          Atomic.set tail.chunk.next (Some (create_chunk ()))
+          Atomic.set new_tail.chunk.next (Some (Chunk.create ()))
   in
   loop ()
 
 let create () =
-  let head_chunk = create_chunk () in
+  let head_chunk = Chunk.create () in
   let queue =
     {
-      head = Atomic.make { chunk = head_chunk; id = 0 };
-      tail = Atomic.make { chunk = head_chunk; id = 0 };
+      head = Atomic.make Position.{ chunk = head_chunk; id = 0 };
+      tail = Atomic.make Position.{ chunk = head_chunk; id = 0 };
     }
   in
   queue
