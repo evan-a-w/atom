@@ -17,7 +17,7 @@
  (name atom)
  (synopsis "Lock free data structures")
  (description "An implementation of 1. A lock free queue")
- (depends ocaml dune core)
+ (depends ocaml dune core unix)
  (tags
   (topics)))
 
