@@ -1,6 +1,6 @@
 (library
- (public_name mpmc)
- (name mpmc)
+ (public_name atom)
+ (name atom)
  (libraries core)
  (preprocess (pps ppx_jane))
  (inline_tests))

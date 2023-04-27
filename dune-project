@@ -1,26 +1,24 @@
 (lang dune 3.7)
 
-(name mpmc)
+(name atom)
 
 (generate_opam_files true)
 
 (source
- (github username/reponame))
+ (github evan-a-w/atom))
 
-(authors "Author Name")
+(authors "Evan Williams")
 
-(maintainers "Maintainer Name")
+(maintainers "Evan Williams")
 
-(license LICENSE)
-
-(documentation https://url/to/documentation)
+(license MIT)
 
 (package
- (name mpmc)
- (synopsis "A short synopsis")
- (description "A longer description")
+ (name atom)
+ (synopsis "Lock free data structures")
+ (description "An implementation of 1. A lock free queue")
  (depends ocaml dune core)
  (tags
-  (topics "to describe" your project)))
+  (topics)))
 
 ; See the complete stanza docs at https://dune.readthedocs.io/en/stable/dune-files.html#dune-project
